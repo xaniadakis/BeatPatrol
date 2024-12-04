@@ -202,6 +202,7 @@ def plot_label_freq(merged_dataset, full_dataset, save_title):
 
     plt.tight_layout()
     plt.savefig(f"assets/{save_title}", dpi=300)
+    plt.show()
 
 class PadPackedSequence(nn.Module):
     def __init__(self):
@@ -362,39 +363,148 @@ class LSTMBackbone(nn.Module):
 
         return last_out
     
-class GenreClassifier(LSTMBackbone):
-    def __init__(self, input_dim, num_classes, **kwargs):
-        super(GenreClassifier, self).__init__(input_dim, **kwargs)
-        in_features = 2*kwargs['rnn_size'] if kwargs["bidirectional"] else kwargs["rnn_size"]
-        self.classifier = nn.Linear(in_features=in_features, out_features=num_classes)
-
-    def forward(self, x, lengths):
-        return self.classifier(super().forward(x, lengths))
 
 def get_device():
     return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
-def train_lstm_classifier(epochs, model, dataloader, device, optimizer, criterion):
-    model.to(device)
+def set_seed(seed):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+class EarlyStopper:
+    def __init__(self, model, save_path, patience=1, min_delta=0):
+        self.model = model
+        self.save_path = save_path
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.min_validation_loss = np.inf
+
+    def early_stop(self, validation_loss):
+        if validation_loss < self.min_validation_loss:
+            self.min_validation_loss = validation_loss
+            self.counter = 0
+            torch.save(self.model.state_dict(), self.save_path)
+        elif validation_loss > (self.min_validation_loss + self.min_delta):
+            self.counter += 1
+            if self.counter >= self.patience:
+                return True
+        return False
+
+def train_one_epoch(model, train_loader, optimizer, device):
     model.train()
-    losses = []
-    for epoch in range(epochs):
-        running_loss = 0.0
-        for features, labels, lengths in tqdm(dataloader):
-            features, labels, lengths = features.to(device), labels.to(device), lengths.to(device)
+    total_loss = 0
+    for x, y, lengths in train_loader:       
+        loss, logits = model(x.float().to(device), y.to(device), lengths.to(device))
+        # prepare
+        optimizer.zero_grad()
+        # backward
+        loss.backward()
+        # optimizer step
+        optimizer.step()
+        total_loss += loss.item()
+    
+    avg_loss = total_loss / len(train_loader)    
+    return avg_loss
 
-            # forward pass
-            outputs = model(features, lengths)
 
-            # loss + backprop + update
-            loss = criterion(outputs, labels)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+def validate_one_epoch(model, val_loader, device):    
+    model.eval()
+    total_loss = 0
+    with torch.no_grad():
+        for x, y, lengths in val_loader:
+            loss, logits = model(x.float().to(device), y.to(device), lengths.to(device))
+            total_loss += loss.item()
+    
+    avg_loss = total_loss / len(val_loader)    
+    return avg_loss
 
-            running_loss += loss.item() * features.size(0)
+def overfit_with_a_couple_of_batches(model, train_loader, optimizer, device):
+    print('Training in overfitting mode...')
+    epochs = 400
+    
+    # get only the 1st batch
+    x_b1, y_b1, lengths_b1 = next(iter(train_loader))    
+    model.train()
+    for epoch in range(epochs):        
+        loss, logits = model(x_b1.float().to(device), y_b1.to(device), lengths_b1.to(device))
+        # prepare
+        optimizer.zero_grad()
+        # backward
+        loss.backward()
+        # optimizer step
+        optimizer.step()
 
-        avg_loss = running_loss / len(dataloader)
-        losses.append(avg_loss)
-        print(f"Epoch {epoch + 1}/{epochs}, Loss: {avg_loss:.4f}")
-    return losses
+        if epoch == 0 or (epoch+1)%20 == 0:
+            print(f'Epoch {epoch+1}, Loss at training set: {loss.item()}')
+
+def train(model, train_loader, val_loader, optimizer, epochs, save_path='checkpoint.pth', device="cuda", overfit_batch=False):
+    if overfit_batch:
+        overfit_with_a_couple_of_batches(model, train_loader, optimizer, device)
+        return
+    else:
+        print(f'Training started for model {save_path.replace(".pth", "")}...')
+        early_stopper = EarlyStopper(model, save_path, patience=5)
+        train_losses, val_losses = [], []
+        for epoch in range(epochs):
+            train_loss = train_one_epoch(model, train_loader, optimizer, device)
+            train_losses.append(train_loss)
+            if val_loader is not None:
+                validation_loss = validate_one_epoch(model, val_loader, device)
+                val_losses.append(validation_loss)
+                print(f'Epoch {epoch+1}/{epochs}\n\tAverage Training Loss: {train_loss}\n\tAverage Validation Loss: {validation_loss}')          
+            
+            if early_stopper.early_stop(validation_loss):
+                print('Early Stopping was activated.')
+                print('Training has been completed.\n')
+                break
+    return train_losses, val_losses
+
+
+class Classifier(nn.Module):
+    def __init__(self, num_classes, backbone):
+        """
+        backbone (nn.Module): The nn.Module to use for spectrogram parsing
+        num_classes (int): The number of classes
+        """
+        super(Classifier, self).__init__()
+        self.backbone = backbone  # An LSTMBackbone or CNNBackbone
+        self.is_lstm = isinstance(self.backbone, LSTMBackbone)
+        self.output_layer = nn.Linear(self.backbone.feature_size, num_classes)
+        self.criterion = nn.CrossEntropyLoss()  # Loss function for classification
+
+    def forward(self, x, targets, lengths):
+        feats = self.backbone(x) if not self.is_lstm else self.backbone(x, lengths)
+        logits = self.output_layer(feats)
+        loss = self.criterion(logits, targets)
+        return loss, logits
+    
+def test_model(model, dataloader, device):
+    model.eval()
+    y_true, y_pred = [], []
+    with torch.no_grad():
+        for x, labels, lengths in dataloader:
+            _, logits = model(x.float().to(device), labels.to(device), lengths.to(device))
+            y_true.append(labels)
+            y_pred.append(logits.detach().cpu().argmax(dim=-1))
+
+    return y_true, y_pred 
+
+def plot_train_val_losses(train_losses, val_losses, save_title):
+    fig = plt.figure(figsize=(10, 8))
+
+    plt.plot(train_losses, color="blue", label="Avg Training Loss")
+    plt.plot(val_losses, color="red", label="Avg Validation Loss")
+
+    plt.legend()
+    plt.title("Average Training/Validation Loss")
+    plt.xlabel("Epochs")
+    plt.ylabel("Average Loss")
+    plt.savefig(save_title, dpi=300)
+    plt.show()
+
