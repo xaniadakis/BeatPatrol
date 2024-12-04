@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from sklearn.metrics import classification_report, precision_recall_fscore_support
-
+from time import time
 
 
 CLASS_MAPPING = {
@@ -396,11 +396,14 @@ class EarlyStopper:
                 return True
         return False
 
-def train_one_epoch(model, train_loader, optimizer, device):
+def train_one_epoch(model, train_loader, optimizer, device, regression_flag):
     model.train()
     total_loss = 0
-    for x, y, lengths in train_loader:       
-        loss, logits = model(x.float().to(device), y.to(device), lengths.to(device))
+    for x, y, lengths in train_loader:
+        if regression_flag:
+            loss, logits = model(x.float().to(device), y.float().to(device), lengths.to(device))
+        else:      
+            loss, logits = model(x.float().to(device), y.to(device), lengths.to(device))
         # prepare
         optimizer.zero_grad()
         # backward
@@ -413,26 +416,31 @@ def train_one_epoch(model, train_loader, optimizer, device):
     return avg_loss
 
 
-def validate_one_epoch(model, val_loader, device):    
+def validate_one_epoch(model, val_loader, device, regression_flag):    
     model.eval()
     total_loss = 0
     with torch.no_grad():
         for x, y, lengths in val_loader:
-            loss, logits = model(x.float().to(device), y.to(device), lengths.to(device))
+            if regression_flag:
+                loss, logits = model(x.float().to(device), y.float().to(device), lengths.to(device))
+            else:
+                loss, logits = model(x.float().to(device), y.to(device), lengths.to(device))
             total_loss += loss.item()
     
     avg_loss = total_loss / len(val_loader)    
     return avg_loss
 
-def overfit_with_a_couple_of_batches(model, train_loader, optimizer, device):
+def overfit_with_a_couple_of_batches(model, train_loader, optimizer, device, regression_flag):
     print('Training in overfitting mode...')
     epochs = 400
-    
     # get only the 1st batch
-    x_b1, y_b1, lengths_b1 = next(iter(train_loader))    
+    x_b1, y_b1, lengths_b1 = next(iter(train_loader))
     model.train()
-    for epoch in range(epochs):        
-        loss, logits = model(x_b1.float().to(device), y_b1.to(device), lengths_b1.to(device))
+    for epoch in range(epochs):
+        if regression_flag:      
+            loss, logits = model(x_b1.float().to(device), y_b1.float().to(device), lengths_b1.to(device))
+        else:
+            loss, logits = model(x_b1.float().to(device), y_b1.to(device), lengths_b1.to(device))
         # prepare
         optimizer.zero_grad()
         # backward
@@ -443,21 +451,25 @@ def overfit_with_a_couple_of_batches(model, train_loader, optimizer, device):
         if epoch == 0 or (epoch+1)%20 == 0:
             print(f'Epoch {epoch+1}, Loss at training set: {loss.item()}')
 
-def train(model, train_loader, val_loader, optimizer, epochs, save_path='checkpoint.pth', device="cuda", overfit_batch=False):
+def train(model, train_loader, val_loader, optimizer, epochs, save_path='checkpoint.pth', device="cuda", overfit_batch=False, regression_flag=False):
     if overfit_batch:
-        overfit_with_a_couple_of_batches(model, train_loader, optimizer, device)
+        overfit_with_a_couple_of_batches(model, train_loader, optimizer, device, regression_flag)
         return
     else:
         print(f'Training started for model {save_path.replace(".pth", "")}...')
         early_stopper = EarlyStopper(model, save_path, patience=5)
         train_losses, val_losses = [], []
         for epoch in range(epochs):
-            train_loss = train_one_epoch(model, train_loader, optimizer, device)
+            start_train = time()
+            train_loss = train_one_epoch(model, train_loader, optimizer, device, regression_flag)
+            end_train = time()
             train_losses.append(train_loss)
             if val_loader is not None:
-                validation_loss = validate_one_epoch(model, val_loader, device)
+                start_val = time()
+                validation_loss = validate_one_epoch(model, val_loader, device, regression_flag)
+                end_val = time()
                 val_losses.append(validation_loss)
-                print(f'Epoch {epoch+1}/{epochs}\n\tAverage Training Loss: {train_loss}\n\tAverage Validation Loss: {validation_loss}')          
+                print(f'Epoch {epoch+1}/{epochs}\n\tAverage Training Loss: {train_loss} ({end_train - start_train:.2f}s)\n\tAverage Validation Loss: {validation_loss}({end_val - start_val:.2f}s)')          
             
             if early_stopper.early_stop(validation_loss):
                 print('Early Stopping was activated.')
@@ -476,23 +488,27 @@ class Classifier(nn.Module):
         self.backbone = backbone  # An LSTMBackbone or CNNBackbone
         self.is_lstm = isinstance(self.backbone, LSTMBackbone)
         self.output_layer = nn.Linear(self.backbone.feature_size, num_classes)
-        self.criterion = nn.CrossEntropyLoss()  # Loss function for classification
+        self.criterion = nn.CrossEntropyLoss() if num_classes > 1 else nn.MSELoss()
 
     def forward(self, x, targets, lengths):
         feats = self.backbone(x) if not self.is_lstm else self.backbone(x, lengths)
         logits = self.output_layer(feats)
+        logits = logits.squeeze(-1) if self.criterion.__class__ == nn.modules.loss.MSELoss else logits
         loss = self.criterion(logits, targets)
         return loss, logits
     
-def test_model(model, dataloader, device):
+def test_model(model, dataloader, device, regression_flag=False):
     model.eval()
     y_true, y_pred = [], []
     with torch.no_grad():
         for x, labels, lengths in dataloader:
             _, logits = model(x.float().to(device), labels.to(device), lengths.to(device))
-            y_true.append(labels)
-            y_pred.append(logits.detach().cpu().argmax(dim=-1))
-
+            if not regression_flag:
+                y_pred.append(logits.argmax(dim=-1).cpu())
+                y_true.append(labels.cpu())
+            else:
+                y_pred.append(logits.cpu().numpy())
+                y_true.append(labels.cpu().numpy())
     return y_true, y_pred 
 
 def plot_train_val_losses(train_losses, val_losses, save_title):
@@ -560,4 +576,20 @@ def get_classification_report(y_pred, y_true):
     print(f"Micro-average precision: {micro_precision:.2f}")
     print(f"Micro-average recall: {micro_recall:.2f}")
     print(f"Micro-average F1-score: {micro_f1:.2f}")
+
+def create_folder(folder):
+    os.makedirs(folder) if not os.path.exists(os.path.join(os.getcwd(), folder)) else None
+
+def get_regression_report(y_pred, y_true):
+    y_true = np.array(y_true).flatten()
+    y_pred = np.array(y_pred).flatten()
+
+    mse = np.mean((y_true - y_pred) ** 2)
+    mae = np.mean(np.abs(y_true - y_pred))
+    rmse = np.sqrt(mse)
+
+    print(f"\tMSE: {mse:.4f}")
+    print(f"\tMAE: {mae:.4f}")
+    print(f"\tRMSE: {rmse:.4f}")
+    
 
