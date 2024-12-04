@@ -10,6 +10,7 @@ import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from sklearn.metrics import classification_report, precision_recall_fscore_support
 from time import time
+from scipy.stats import spearmanr
 
 
 CLASS_MAPPING = {
@@ -499,7 +500,7 @@ class Classifier(nn.Module):
     
 def test_model(model, dataloader, device, regression_flag=False):
     model.eval()
-    y_true, y_pred = [], []
+    y_true, y_pred, spear_corrs = [], [], []
     with torch.no_grad():
         for x, labels, lengths in dataloader:
             _, logits = model(x.float().to(device), labels.to(device), lengths.to(device))
@@ -509,7 +510,10 @@ def test_model(model, dataloader, device, regression_flag=False):
             else:
                 y_pred.append(logits.cpu().numpy())
                 y_true.append(labels.cpu().numpy())
-    return y_true, y_pred 
+                batch_spearman_corr, _ = spearmanr(labels.cpu().numpy().flatten(), logits.detach().cpu().numpy().flatten())
+                spear_corrs.append(batch_spearman_corr)
+    return (y_true, y_pred) if not regression_flag else (y_true, y_pred, spear_corrs)
+
 
 def plot_train_val_losses(train_losses, val_losses, save_title):
     fig = plt.figure(figsize=(10, 8))
@@ -580,14 +584,16 @@ def get_classification_report(y_pred, y_true):
 def create_folder(folder):
     os.makedirs(folder) if not os.path.exists(os.path.join(os.getcwd(), folder)) else None
 
-def get_regression_report(y_pred, y_true):
+def get_regression_report(y_pred, y_true, spear_corrs):
     y_true = np.array(y_true).flatten()
     y_pred = np.array(y_pred).flatten()
 
     mse = np.mean((y_true - y_pred) ** 2)
     mae = np.mean(np.abs(y_true - y_pred))
     rmse = np.sqrt(mse)
+    spear_corr, _ = spearmanr(y_true, y_pred)
 
+    print(f"\tSpearman Correlation: {np.mean(spear_corrs):.4f}")
     print(f"\tMSE: {mse:.4f}")
     print(f"\tMAE: {mae:.4f}")
     print(f"\tRMSE: {rmse:.4f}")
