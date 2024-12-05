@@ -14,7 +14,7 @@ import gc
 import torch.nn as nn
 import timm
 from timm.models.layers import to_2tuple,trunc_normal_
-from torch.amp import autocast
+#from torch.amp import autocast
 from tqdm import tqdm
 
 
@@ -704,7 +704,7 @@ class ASTBackbone(nn.Module):
         t_dim = test_out.shape[3]
         return f_dim, t_dim
 
-    @autocast('cuda')
+    #@autocast('cuda')
     def forward(self, x):
         """
         :param x: the input spectrogram, expected shape: (batch_size, time_frame_num, frequency_bins), e.g., (12, 1024, 128)
@@ -833,7 +833,7 @@ def eval_multi_task(model, val_dl, device):
     valence_loss = 0.
     energy_loss = 0.
     dance_loss = 0.
-    with torch.inference_model():
+    with torch.inference_mode():
         for inputs, targets, _ in (val_dl):
             inputs, targets = inputs.to(device), targets.to(device)
             loss, losses, logits = model(inputs.float(), targets.float())
@@ -882,9 +882,12 @@ def train_multi_task_learning(epochs, device, train_dl, val_dl, model, optimizer
         val_energy_losses.append(avg_val_energy_loss)
         val_dance_losses.append(avg_val_dance_loss)
 
+        train_losses = {"Total Loss": train_total_losses, "Valence Loss": train_valence_losses, "Energy Loss": train_energy_losses, "Danceability Loss": train_dance_losses}
+        val_losses = {"Total Loss": val_total_losses, "Valence Loss": val_valence_losses, "Energy Loss": val_energy_losses, "Danceability Loss": val_dance_losses}
+
         if early_stopper.early_stop(avg_val_total_loss):
                 print('Early Stopping was activated.')
                 print('Training has been completed.\n')
                 break
         
-    return train_total_losses, train_valence_losses, train_energy_losses, train_dance_losses, val_total_losses, val_valence_losses, val_energy_losses, val_dance_losses
+    return train_losses, val_losses
