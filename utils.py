@@ -15,6 +15,7 @@ import torch.nn as nn
 import timm
 from timm.models.layers import to_2tuple,trunc_normal_
 from torch.amp import autocast
+from tqdm import tqdm
 
 
 CLASS_MAPPING = {
@@ -759,3 +760,131 @@ def free_gpu_memory(cleanup=True):
     total_memory = torch.cuda.get_device_properties(0).total_memory
     return ((total_memory - torch.cuda.memory_reserved()) / total_memory) * 100
 
+
+class MultiTaskClassifier(nn.Module):
+    def __init__(self, num_tasks, backbone, task_feature_sizes):
+        """
+        num_tasks (int): The number of tasks
+        backbone (nn.Module): The shared backbone
+        task_feature_sizes (list of int): Output sizes for each task
+        """
+        super(MultiTaskClassifier, self).__init__()
+        self.backbone = backbone  # Shared backbone
+        
+        # Separate output layers for each task
+        self.output_layers = nn.ModuleList([
+            nn.Linear(self.backbone.feature_size, task_feature_sizes[i]) for i in range(num_tasks)
+        ])
+        
+        # Criterion for each task
+        self.criterions = [nn.MSELoss() for _ in range(num_tasks)]  # Regression losses
+
+    def forward(self, x, targets):
+        """
+        x: Input features
+        targets: List of target tensors for each task
+        lengths: Sequence lengths (for LSTM inputs)
+        """
+        # shared feature extraction
+        feats = self.backbone(x)
+        
+        # task-specific outputs each element holds the predictions for the corresponding head
+        logits = [output_layer(feats) for output_layer in self.output_layers]
+        logits = [logit.squeeze(-1) for logit in logits]
+        
+        # Compute losses for each task
+        losses = [criterion(logits[i], targets[:, i]) for i, criterion in enumerate(self.criterions)]
+        
+        # weighted sum of losses (equal weight for simplicity; can be tuned)
+        total_loss = sum(losses)
+        
+        return total_loss, losses, logits
+    
+def multi_task_learning_one_epoch(device, train_dl, model, optimizer, scheduler):
+    model.to(device)
+    model.train()
+    curr_total_loss, curr_valence_loss = 0., 0.
+    curr_energy_loss, curr_dance_loss = 0., 0.
+    for inputs, targets, _ in tqdm(train_dl):
+        inputs, targets = inputs.to(device), targets.to(device)
+        optimizer.zero_grad()
+        loss, losses, logits = model(inputs.float(), targets.float())
+        loss.backward()
+        # clip gradients
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+        scheduler.step()
+        curr_total_loss += loss.item()
+        curr_valence_loss += losses[0].item()
+        curr_energy_loss += losses[1].item()
+        curr_dance_loss += losses[2].item()
+
+    avg_total_loss = (curr_total_loss / len(train_dl))
+    avg_valence_loss = (curr_valence_loss / len(train_dl))
+    avg_energy_loss = (curr_energy_loss / len(train_dl))
+    avg_dance_loss = (curr_dance_loss / len(train_dl))
+    
+    return avg_total_loss, avg_valence_loss, avg_energy_loss, avg_dance_loss    
+
+def eval_multi_task(model, val_dl, device):
+    model.to(device)
+    model.eval()
+    total_loss = 0.
+    valence_loss = 0.
+    energy_loss = 0.
+    dance_loss = 0.
+    with torch.inference_model():
+        for inputs, targets, _ in (val_dl):
+            inputs, targets = inputs.to(device), targets.to(device)
+            loss, losses, logits = model(inputs.float(), targets.float())
+            total_loss += loss.item()
+            valence_loss += losses[0].item()
+            energy_loss += losses[1].item()
+            dance_loss += losses[2].item()
+
+    avg_total_loss = (total_loss / len(val_dl))
+    avg_valence_loss = (valence_loss / len(val_dl))
+    avg_energy_loss = (energy_loss / len(val_dl))
+    avg_dance_loss = (dance_loss / len(val_dl))
+    
+    return avg_total_loss, avg_valence_loss, avg_energy_loss, avg_dance_loss
+
+def train_multi_task_learning(epochs, device, train_dl, val_dl, model, optimizer, scheduler, save_path):
+    train_total_losses, train_valence_losses = [], []
+    train_energy_losses, train_dance_losses = [], []
+    val_total_losses, val_valence_losses = [], []
+    val_energy_losses, val_dance_losses = [], []
+    early_stopper = EarlyStopper(model, save_path, patience=5)
+    print(f'Training started for model {save_path.replace(".pth", "")}...')
+    for epoch in range(epochs):
+        avg_train_total_loss, avg_train_valence_loss, avg_train_energy_loss, avg_train_dance_loss = multi_task_learning_one_epoch(device, train_dl, model, optimizer, scheduler)
+        avg_val_total_loss, avg_val_valence_loss, avg_val_energy_loss, avg_val_dance_loss = eval_multi_task(model, val_dl, device)
+        
+        print(f'Epoch {epoch + 1}')
+        print(f"Training Metrics")
+        print(f"\t\tAverage Total Loss: {avg_train_total_loss: .2f}")
+        print(f"\t\tAverage Valence Loss: {avg_train_valence_loss: .2f}")
+        print(f"\t\tAverage Energy Loss: {avg_train_energy_loss: .2f}")
+        print(f"\t\tAverage Danceability Loss: {avg_train_dance_loss: .2f}")
+        print(f"Evaluation Metrics")
+        print(f"\t\tAverage Total Loss: {avg_val_total_loss: .2f}")
+        print(f"\t\tAverage Valence Loss: {avg_val_valence_loss: .2f}")
+        print(f"\t\tAverage Energy Loss: {avg_val_energy_loss: .2f}")
+        print(f"\t\tAverage Danceability Loss: {avg_val_dance_loss: .2f}")
+
+        train_total_losses.append(avg_train_total_loss)
+        train_valence_losses.append(avg_train_valence_loss)
+        train_energy_losses.append(avg_train_energy_loss)
+        train_dance_losses.append(avg_train_dance_loss)
+
+        val_total_losses.append(avg_val_total_loss)
+        val_valence_losses.append(avg_val_valence_loss)
+        val_energy_losses.append(avg_val_energy_loss)
+        val_dance_losses.append(avg_val_dance_loss)
+
+        if early_stopper.early_stop(avg_val_total_loss):
+                print('Early Stopping was activated.')
+                print('Training has been completed.\n')
+                break
+        
+    return train_total_losses, train_valence_losses, train_energy_losses, train_dance_losses, val_total_losses, val_valence_losses, val_energy_losses, val_dance_losses
