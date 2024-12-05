@@ -729,6 +729,17 @@ class ASTBackbone(nn.Module):
         x = self.mlp_head(x)
         return x.float()
 
+    def freeze_layers(self, unfrozen_layers=2):
+        """
+        Keep the last unfrozen_layers transformer layers trainable and freeze all the rest
+        """
+        num_layers = len(self.v.blocks)
+        for i, blk in enumerate(self.v.blocks):
+            if i < num_layers - unfrozen_layers:
+                for param in blk.parameters():
+                    param.requires_grad = False
+
+
 def get_classification_report(y_pred, y_true):
     print(classification_report(y_pred=y_pred, y_true=y_true, zero_division=np.nan))
     micro_precision, micro_recall, micro_f1, _ = precision_recall_fscore_support(y_true, y_pred, average='micro')
