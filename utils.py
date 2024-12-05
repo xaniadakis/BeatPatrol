@@ -106,6 +106,23 @@ class PaddingTransform(object):
             s1 = np.vstack((s1, pad))
             return s1
 
+class MultiTaskDataset(Dataset):
+    def __init__(self, features, labels, max_length=None):
+        self.features = features
+        self.labels = torch.tensor(labels, dtype=torch.float32)
+        self.lengths = [f.shape[0] for f in features]
+        self.max_length = max(self.lengths) if max_length is None else max_length
+        self.zero_pad_and_stack = PaddingTransform(self.max_length)
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        features = torch.tensor(self.zero_pad_and_stack(self.features[idx]), dtype=torch.float32)
+        label = self.labels[idx]
+        length = min(self.lengths[idx], self.max_length)
+        return features, label, length
+
 
 class SpectrogramDataset(Dataset):
     def __init__(
@@ -728,7 +745,6 @@ def get_regression_report(y_pred, y_true, spear_corrs):
     mse = np.mean((y_true - y_pred) ** 2)
     mae = np.mean(np.abs(y_true - y_pred))
     rmse = np.sqrt(mse)
-    spear_corr, _ = spearmanr(y_true, y_pred)
 
     print(f"\tSpearman Correlation: {np.mean(spear_corrs):.4f}")
     print(f"\tMSE: {mse:.4f}")
