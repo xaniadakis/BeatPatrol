@@ -473,13 +473,14 @@ def overfit_with_a_couple_of_batches(model, train_loader, optimizer, device, reg
         if epoch == 0 or (epoch+1)%20 == 0:
             print(f'Epoch {epoch+1}, Loss at training set: {loss.item()}')
 
-def train(model, train_loader, val_loader, optimizer, epochs=400, save_path='checkpoint.pth', device="cuda", overfit_batch=False, regression_flag=False):
+def train(model, train_loader, val_loader, optimizer, epochs=400, save_path='checkpoint.pth', device="cuda",
+          overfit_batch=False, regression_flag=False, patience=5):
     if overfit_batch:
         overfit_with_a_couple_of_batches(model, train_loader, optimizer, device, regression_flag, epochs=epochs)
         return
     else:
         print(f'Training started for model {save_path.replace(".pth", "")}...')
-        early_stopper = EarlyStopper(model, save_path, patience=5)
+        early_stopper = EarlyStopper(model, save_path, patience=patience)
         train_losses, val_losses = [], []
         for epoch in range(epochs):
             start_train = time()
@@ -532,9 +533,12 @@ class Regressor(nn.Module):
         loss = self.criterion(out.float(), targets.float())
         return loss, out
 
+
+from scipy.stats import spearmanr, pearsonr
+
 def test_model(model, dataloader, device, regression_flag=False):
     model.eval()
-    y_true, y_pred, spear_corrs = [], [], []
+    y_true, y_pred, spear_corrs, pear_corrs = [], [], [], []
     with torch.no_grad():
         for x, labels, lengths in dataloader:
             _, logits = model(x.float().to(device), labels.to(device), lengths.to(device))
@@ -544,9 +548,19 @@ def test_model(model, dataloader, device, regression_flag=False):
             else:
                 y_pred.append(logits.cpu().numpy())
                 y_true.append(labels.cpu().numpy())
-                batch_spearman_corr, _ = spearmanr(labels.cpu().numpy().flatten(), logits.detach().cpu().numpy().flatten())
+
+                # Compute Spearman and Pearson Correlations for the batch
+                batch_labels = labels.cpu().numpy().flatten()
+                batch_logits = logits.detach().cpu().numpy().flatten()
+
+                batch_spearman_corr, _ = spearmanr(batch_labels, batch_logits)
+                batch_pearson_corr, _ = pearsonr(batch_labels, batch_logits)
+
                 spear_corrs.append(batch_spearman_corr)
-    return (y_true, y_pred) if not regression_flag else (y_true, y_pred, spear_corrs)
+                pear_corrs.append(batch_pearson_corr)
+
+    # Return results
+    return (y_true, y_pred) if not regression_flag else (y_true, y_pred, spear_corrs, pear_corrs)
 
 
 def plot_train_val_losses(train_losses, val_losses, save_title):
@@ -739,7 +753,6 @@ class ASTBackbone(nn.Module):
                 for param in blk.parameters():
                     param.requires_grad = False
 
-
 def get_classification_report(y_pred, y_true):
     print(classification_report(y_pred=y_pred, y_true=y_true, zero_division=np.nan))
     micro_precision, micro_recall, micro_f1, _ = precision_recall_fscore_support(y_true, y_pred, average='micro')
@@ -750,7 +763,7 @@ def get_classification_report(y_pred, y_true):
 def create_folder(folder):
     os.makedirs(folder) if not os.path.exists(os.path.join(os.getcwd(), folder)) else None
 
-def get_regression_report(y_pred, y_true, spear_corrs):
+def get_regression_report(y_pred, y_true, spear_corrs, pear_corrs):
     y_true = np.array(y_true).flatten()
     y_pred = np.array(y_pred).flatten()
 
@@ -758,11 +771,19 @@ def get_regression_report(y_pred, y_true, spear_corrs):
     mae = np.mean(np.abs(y_true - y_pred))
     rmse = np.sqrt(mse)
 
-    print(f"\tSpearman Correlation: {np.mean(spear_corrs):.4f}")
+    mean_absolute_percentage_error = np.mean(np.abs((y_true - y_pred) / np.maximum(y_true, 1e-8))) * 100
+    r2_score = 1 - (np.sum((y_true - y_pred) ** 2) / np.sum((y_true - np.mean(y_true)) ** 2))
+    explained_variance_score = 1 - (np.var(y_true - y_pred) / np.var(y_true))
+
+    print(f"\tAverage Spearman Correlation: {np.mean(spear_corrs):.4f}")
+    print(f"\tAverage Pearson Correlation: {np.mean(pear_corrs):.4f}")
     print(f"\tMSE: {mse:.4f}")
     print(f"\tMAE: {mae:.4f}")
     print(f"\tRMSE: {rmse:.4f}")
-    
+    print(f"\tMean Absolute Percentage Error (MAPE): {mean_absolute_percentage_error:.4f}%")
+    print(f"\tR^2 Score: {r2_score:.4f}")
+    print(f"\tExplained Variance Score: {explained_variance_score:.4f}")
+
 def free_gpu_memory(cleanup=True):
     if cleanup:
         gc.collect()
@@ -770,7 +791,6 @@ def free_gpu_memory(cleanup=True):
         torch.cuda.ipc_collect()
     total_memory = torch.cuda.get_device_properties(0).total_memory
     return ((total_memory - torch.cuda.memory_reserved()) / total_memory) * 100
-
 
 class MultiTaskClassifier(nn.Module):
     def __init__(self, num_tasks, backbone, task_feature_sizes):
