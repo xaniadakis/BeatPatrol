@@ -16,6 +16,7 @@ import timm
 from timm.models.layers import to_2tuple,trunc_normal_
 #from torch.amp import autocast
 from tqdm import tqdm
+import seaborn as sns
 
 
 CLASS_MAPPING = {
@@ -455,6 +456,7 @@ def validate_one_epoch(model, val_loader, device, regression_flag):
 
 def overfit_with_a_couple_of_batches(model, train_loader, optimizer, device, regression_flag, epochs=400):
     print('Training in overfitting mode...')
+    train_losses = []
     # get only the 1st batch
     x_b1, y_b1, lengths_b1 = next(iter(train_loader))
     model.train()
@@ -469,15 +471,18 @@ def overfit_with_a_couple_of_batches(model, train_loader, optimizer, device, reg
         loss.backward()
         # optimizer step
         optimizer.step()
-
+        train_losses.append(loss.item())
         if epoch == 0 or (epoch+1)%20 == 0:
             print(f'Epoch {epoch+1}, Loss at training set: {loss.item()}')
+
+    return train_losses
+
 
 def train(model, train_loader, val_loader, optimizer, epochs=400, save_path='checkpoint.pth', device="cuda",
           overfit_batch=False, regression_flag=False, patience=5):
     if overfit_batch:
-        overfit_with_a_couple_of_batches(model, train_loader, optimizer, device, regression_flag, epochs=epochs)
-        return
+         train_losses = overfit_with_a_couple_of_batches(model, train_loader, optimizer, device, regression_flag, epochs=epochs)
+         return train_losses, []
     else:
         print(f'Training started for model {save_path.replace(".pth", "")}...')
         early_stopper = EarlyStopper(model, save_path, patience=patience)
@@ -564,16 +569,22 @@ def test_model(model, dataloader, device, regression_flag=False):
 
 
 def plot_train_val_losses(train_losses, val_losses, save_title):
+    sns.set_style("whitegrid")
     fig = plt.figure(figsize=(5, 4))
 
-    plt.plot(train_losses, color="blue", label="Avg Training Loss")
-    plt.plot(val_losses, color="red", label="Avg Validation Loss")
+    plt.plot(train_losses, label="Training Loss", linewidth=2, alpha=0.8, color='dodgerblue')
+    if len(val_losses) > 0:
+        plt.plot(val_losses, label="Validation Loss", linewidth=2, alpha=0.8, color='orange')
+        plt.title("Training vs Validation Loss", fontsize=16, fontweight="bold")
+    else:
+        plt.title("Training Loss", fontsize=16, fontweight="bold")
 
-    plt.legend()
-    plt.title("Average Training/Validation Loss")
-    plt.xlabel("Epochs")
-    plt.ylabel("Average Loss")
-    plt.savefig(save_title, dpi=300)
+    plt.xlabel("Epochs", fontsize=14)
+    plt.ylabel("Loss", fontsize=14)
+
+    plt.legend(loc="upper right", fontsize=12, frameon=True, shadow=True)
+    plt.grid(visible=True, linestyle='--', linewidth=0.5, alpha=0.7)
+    plt.savefig(save_title, dpi=300, bbox_inches='tight')
     plt.show()
 
 
