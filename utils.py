@@ -17,6 +17,7 @@ from timm.models.layers import to_2tuple,trunc_normal_
 #from torch.amp import autocast
 from tqdm import tqdm
 import seaborn as sns
+from scipy.stats import spearmanr, pearsonr
 
 
 CLASS_MAPPING = {
@@ -538,10 +539,8 @@ class Regressor(nn.Module):
         loss = self.criterion(out.float(), targets.float())
         return loss, out
 
-
-from scipy.stats import spearmanr, pearsonr
-
 def test_model(model, dataloader, device, regression_flag=False):
+    model.to(device)
     model.eval()
     y_true, y_pred, spear_corrs, pear_corrs = [], [], [], []
     with torch.no_grad():
@@ -554,7 +553,7 @@ def test_model(model, dataloader, device, regression_flag=False):
                 y_pred.append(logits.cpu().numpy())
                 y_true.append(labels.cpu().numpy())
 
-                # Compute Spearman and Pearson Correlations for the batch
+                # compute Spearman and Pearson Correlations for the batch
                 batch_labels = labels.cpu().numpy().flatten()
                 batch_logits = logits.detach().cpu().numpy().flatten()
 
@@ -564,7 +563,6 @@ def test_model(model, dataloader, device, regression_flag=False):
                 spear_corrs.append(batch_spearman_corr)
                 pear_corrs.append(batch_pearson_corr)
 
-    # Return results
     return (y_true, y_pred) if not regression_flag else (y_true, y_pred, spear_corrs, pear_corrs)
 
 
@@ -766,7 +764,7 @@ class ASTBackbone(nn.Module):
 
 def get_classification_report(y_pred, y_true):
     print(classification_report(y_pred=y_pred, y_true=y_true, zero_division=np.nan))
-    micro_precision, micro_recall, micro_f1, _ = precision_recall_fscore_support(y_true, y_pred, average='micro')
+    micro_precision, micro_recall, micro_f1, _ = precision_recall_fscore_support(y_true, y_pred, average='micro', zero_division=np.nan)
     print(f"Micro-average precision: {micro_precision:.2f}")
     print(f"Micro-average recall: {micro_recall:.2f}")
     print(f"Micro-average F1-score: {micro_f1:.2f}")
@@ -811,15 +809,13 @@ class MultiTaskClassifier(nn.Module):
         task_feature_sizes (list of int): Output sizes for each task
         """
         super(MultiTaskClassifier, self).__init__()
-        self.backbone = backbone  # Shared backbone
-        
-        # Separate output layers for each task
+        self.backbone = backbone  
+
         self.output_layers = nn.ModuleList([
             nn.Linear(self.backbone.feature_size, task_feature_sizes[i]) for i in range(num_tasks)
         ])
         
-        # Criterion for each task
-        self.criterions = [nn.MSELoss() for _ in range(num_tasks)]  # Regression losses
+        self.criterions = [nn.MSELoss() for _ in range(num_tasks)] 
 
     def forward(self, x, targets):
         """
@@ -830,14 +826,14 @@ class MultiTaskClassifier(nn.Module):
         # shared feature extraction
         feats = self.backbone(x)
         
-        # task-specific outputs each element holds the predictions for the corresponding head
+        # task-specific outputs
         logits = [output_layer(feats) for output_layer in self.output_layers]
         logits = [logit.squeeze(-1) for logit in logits]
         
-        # Compute losses for each task
+        # loss for each task
         losses = [criterion(logits[i], targets[:, i]) for i, criterion in enumerate(self.criterions)]
         
-        # weighted sum of losses (equal weight for simplicity; can be tuned)
+        # weighted sum of losses
         total_loss = sum(losses)
         
         return total_loss, losses, logits
