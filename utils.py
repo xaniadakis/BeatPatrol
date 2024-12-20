@@ -8,7 +8,6 @@ from torch.utils.data import DataLoader, Dataset, SubsetRandomSampler
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from sklearn.metrics import classification_report, precision_recall_fscore_support
 from time import time
-from scipy.stats import spearmanr
 import torch
 import gc
 import torch.nn as nn
